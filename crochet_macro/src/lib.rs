@@ -352,7 +352,7 @@ pub fn hook(attrs: TokenStream, input: TokenStream) -> TokenStream {
         macro_rules! original {
             () => {
                 unsafe {
-                    ::core::mem::transmute::<_, extern #abi fn(#(#args_tokens),*) #return_tokens>(
+                    ::core::mem::transmute::<*const (), extern #abi fn(#(#args_tokens),*) #return_tokens>(
                         #_const.trampoline()
                     )
                 }
