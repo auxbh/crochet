@@ -1,6 +1,6 @@
 [package]
 name = "crochet_macro"
-version = "0.2.3"
+version = "0.2.4"
 authors = ["Adamaq01 <adamthibert01@gmail.com>"]
 edition = "2021"
 license = "MIT"

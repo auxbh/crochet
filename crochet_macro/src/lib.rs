@@ -2,11 +2,11 @@ use convert_case::{Case, Casing};
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{quote, ToTokens};
+use syn::spanned::Spanned;
 use syn::{
     parse::Parse, parse_macro_input, parse_quote, token, AttrStyle, ExprPath, Ident, LitBool,
-    LitStr, Stmt, Token,
+    LitInt, LitStr, Stmt, Token,
 };
-use syn::spanned::Spanned;
 
 mod kw {
     syn::custom_keyword!(library);
@@ -15,6 +15,7 @@ mod kw {
     syn::custom_keyword!(_self);
     syn::custom_keyword!(self_);
     syn::custom_keyword!(this);
+    syn::custom_keyword!(offset);
 }
 
 #[derive(Clone)]
@@ -27,13 +28,25 @@ impl StrOrSelf {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         let look = input.lookahead1();
         if look.peek(Token![self]) {
-            input.parse::<Token![self]>().map(|token| token.span()).map(Self::SelfValue)
+            input
+                .parse::<Token![self]>()
+                .map(|token| token.span())
+                .map(Self::SelfValue)
         } else if look.peek(kw::_self) {
-            input.parse::<kw::_self>().map(|token| token.span()).map(Self::SelfValue)
+            input
+                .parse::<kw::_self>()
+                .map(|token| token.span())
+                .map(Self::SelfValue)
         } else if look.peek(kw::self_) {
-            input.parse::<kw::self_>().map(|token| token.span()).map(Self::SelfValue)
+            input
+                .parse::<kw::self_>()
+                .map(|token| token.span())
+                .map(Self::SelfValue)
         } else if look.peek(kw::this) {
-            input.parse::<kw::this>().map(|token| token.span()).map(Self::SelfValue)
+            input
+                .parse::<kw::this>()
+                .map(|token| token.span())
+                .map(Self::SelfValue)
         } else {
             input.parse::<LitStr>().map(Self::LitStr)
         }
@@ -72,6 +85,7 @@ impl StrOrSelf {
 struct HookAttrs {
     library: StrOrSelf,
     symbol: LitStr,
+    offset: isize,
     compile_check: bool,
 }
 
@@ -79,6 +93,7 @@ impl Parse for HookAttrs {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         let mut library = None;
         let mut symbol = None;
+        let mut offset = 0;
         let mut unknown = None;
         let mut compile_check = false;
         while !input.is_empty() {
@@ -87,7 +102,10 @@ impl Parse for HookAttrs {
                 input.parse::<kw::library>()?;
                 input.parse::<Token![=]>()?;
                 library = Some(StrOrSelf::parse(input)?);
-                if symbol.is_none() && unknown.is_some() && unknown.as_ref().is_some_and(StrOrSelf::is_lit) {
+                if symbol.is_none()
+                    && unknown.is_some()
+                    && unknown.as_ref().is_some_and(StrOrSelf::is_lit)
+                {
                     symbol = Some(unknown.unwrap().unwrap_lit());
                     unknown = None;
                 }
@@ -99,6 +117,10 @@ impl Parse for HookAttrs {
                     library = unknown;
                     unknown = None;
                 }
+            } else if look.peek(kw::offset) {
+                input.parse::<kw::offset>()?;
+                input.parse::<Token![=]>()?;
+                offset = input.parse::<LitInt>()?.base10_parse::<isize>()?;
             } else if look.peek(kw::compile_check) {
                 input.parse::<kw::compile_check>()?;
                 let look = input.lookahead1();
@@ -141,6 +163,7 @@ impl Parse for HookAttrs {
             Ok(HookAttrs {
                 library,
                 symbol,
+                offset,
                 compile_check,
             })
         } else if library.is_some() {
@@ -199,10 +222,7 @@ impl Parse for LoadAttrs {
                 compile_check,
             })
         } else {
-            Err(syn::Error::new(
-                Span::call_site(),
-                "Missing library",
-            ))
+            Err(syn::Error::new(Span::call_site(), "Missing library"))
         }
     }
 }
@@ -224,7 +244,7 @@ fn remove_mut(arg: &syn::FnArg) -> syn::FnArg {
 fn open_library(token: StrOrSelf) -> Result<dlopen2::raw::Library, dlopen2::Error> {
     match token {
         StrOrSelf::SelfValue(_) => dlopen2::raw::Library::open_self(),
-        StrOrSelf::LitStr(lit) => dlopen2::raw::Library::open(lit.value())
+        StrOrSelf::LitStr(lit) => dlopen2::raw::Library::open(lit.value()),
     }
 }
 
@@ -244,10 +264,12 @@ fn open_library(token: StrOrSelf) -> Result<dlopen2::raw::Library, dlopen2::Erro
 ///
 /// - `library`: the name of the dynamic library to hook or one of `self`, `_self`, `self_` or `this`.
 /// - `symbol`: the name of the function to hook.
+/// - `offset`: the offset to apply to the function pointer (default is `0`).
 /// - `compile_check`: whether to check if the library and symbol are available at compile time.
 ///
 /// The macro attributes syntax is very flexible, hence:
 /// * the `compile_check` attribute is optional and a boolean value can be specified if wanted.
+/// * the `offset` attribute is optional and defaults to 0 if not specified.
 /// * the `library` attribute is mandatory, though the keyword `library` is optional.
 /// * the `symbol` attribute is mandatory, though the keyword `symbol` is optional.
 /// * if no prefix are given for the `library` and/or `symbol` attributes, then the first one will be considered as the `library` and the second one as the `symbol`.
@@ -299,7 +321,14 @@ pub fn hook(attrs: TokenStream, input: TokenStream) -> TokenStream {
             name: Some(LitStr::new("system", Span::call_site())),
         });
     }
-    let abi = mod_fn.sig.abi.clone().unwrap().name.map(|lit| lit.value()).unwrap_or("system".to_string());
+    let abi = mod_fn
+        .sig
+        .abi
+        .clone()
+        .unwrap()
+        .name
+        .map(|lit| lit.value())
+        .unwrap_or("system".to_string());
 
     let args_tokens = mod_fn.sig.inputs.iter().map(remove_mut);
     let return_tokens = mod_fn.sig.output.to_token_stream();
@@ -309,7 +338,7 @@ pub fn hook(attrs: TokenStream, input: TokenStream) -> TokenStream {
             "_{}",
             mod_fn.sig.ident.to_string().to_case(Case::UpperSnake)
         )
-            .as_str(),
+        .as_str(),
         Span::call_site(),
     );
 
@@ -364,13 +393,15 @@ pub fn hook(attrs: TokenStream, input: TokenStream) -> TokenStream {
         StrOrSelf::LitStr(lit) => quote!(crochet::dlopen2::raw::Library::open(#lit)),
     };
 
+    let offset = attrs.offset;
     quote!(
         crochet::lazy_static::lazy_static! {
             static ref #_const: crochet::detour::RawDetour = unsafe {
                 let symbol = #open_library
                     .expect("Could not open library")
                     .symbol::<*const ()>(#symbol)
-                    .expect("Could not find symbol in library");
+                    .expect("Could not find symbol in library")
+                    .wrapping_byte_offset(#offset);
 
                 crochet::detour::RawDetour::new(symbol, #ident as *const ()).expect("Could not load detour")
             };
@@ -421,7 +452,7 @@ pub fn enable(attrs: TokenStream) -> TokenStream {
     quote!(
         #hook()
     )
-        .into()
+    .into()
 }
 
 /// Disables a previously defined dynamic library hook.
@@ -453,7 +484,7 @@ pub fn disable(attrs: TokenStream) -> TokenStream {
     quote!(
         #hook()
     )
-        .into()
+    .into()
 }
 
 /// Checks if a previously defined dynamic library hook is enabled.
@@ -489,7 +520,7 @@ pub fn is_enabled(attrs: TokenStream) -> TokenStream {
     quote!(
         #hook()
     )
-        .into()
+    .into()
 }
 
 ///
@@ -519,7 +550,12 @@ pub fn is_enabled(attrs: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn load(attrs: TokenStream, input: TokenStream) -> TokenStream {
     let mod_foreign = parse_macro_input!(input as syn::ItemForeignMod);
-    let abi = mod_foreign.abi.clone().name.map(|lit| lit.value()).unwrap_or("system".to_string());
+    let abi = mod_foreign
+        .abi
+        .clone()
+        .name
+        .map(|lit| lit.value())
+        .unwrap_or("system".to_string());
     let attrs = parse_macro_input!(attrs as LoadAttrs);
     let library = attrs.library;
     let compile_check = attrs.compile_check;
@@ -527,20 +563,27 @@ pub fn load(attrs: TokenStream, input: TokenStream) -> TokenStream {
     let mut symbols = Vec::new();
     for item in mod_foreign.items {
         if let syn::ForeignItem::Fn(mod_fn) = item {
-            if mod_fn.attrs.len() > 1 || (mod_fn.attrs.len() == 1 && !mod_fn.attrs[0].path.is_ident("symbol")) {
-                return syn::Error::new(
-                    mod_fn.span(),
-                    "Only symbol attribute is allowed here",
-                ).to_compile_error().into();
+            if mod_fn.attrs.len() > 1
+                || (mod_fn.attrs.len() == 1 && !mod_fn.attrs[0].path.is_ident("symbol"))
+            {
+                return syn::Error::new(mod_fn.span(), "Only symbol attribute is allowed here")
+                    .to_compile_error()
+                    .into();
             }
 
             let (symbol, span) = {
-                let symbol = mod_fn.attrs.first().map(|attr| {
-                    let lit = attr.parse_args::<LitStr>()
-                        .map_err(|_| syn::Error::new(attr.span(), "Invalid symbol attribute").to_compile_error())?;
+                let symbol = mod_fn
+                    .attrs
+                    .first()
+                    .map(|attr| {
+                        let lit = attr.parse_args::<LitStr>().map_err(|_| {
+                            syn::Error::new(attr.span(), "Invalid symbol attribute")
+                                .to_compile_error()
+                        })?;
 
-                    Ok((lit.value(), attr.tokens.span()))
-                }).unwrap_or_else(|| Ok((mod_fn.sig.ident.to_string(), mod_fn.sig.ident.span())));
+                        Ok((lit.value(), attr.tokens.span()))
+                    })
+                    .unwrap_or_else(|| Ok((mod_fn.sig.ident.to_string(), mod_fn.sig.ident.span())));
 
                 if let Ok((symbol, span)) = symbol {
                     (symbol, span)
@@ -569,45 +612,60 @@ pub fn load(attrs: TokenStream, input: TokenStream) -> TokenStream {
                 signature: mod_fn.sig,
             });
         } else {
-            return syn::Error::new(item.span(), "Only functions are supported in crochet::load!").to_compile_error().into();
+            return syn::Error::new(
+                item.span(),
+                "Only functions are supported in crochet::load!",
+            )
+            .to_compile_error()
+            .into();
         }
     }
 
     let _const = Ident::new(
         format!(
             "_{}",
-            library.value()
-                .replace('.', "_")
-                .to_case(Case::UpperSnake)
+            library.value().replace('.', "_").to_case(Case::UpperSnake)
         )
-            .as_str(),
+        .as_str(),
         Span::call_site(),
     );
 
     let _type = Ident::new(
         format!(
             "_{}",
-            library.value()
-                .replace('.', "_")
-                .to_case(Case::Pascal)
+            library.value().replace('.', "_").to_case(Case::Pascal)
         )
-            .as_str(),
+        .as_str(),
         Span::call_site(),
     );
     let symbols = Symbols(_type.clone(), symbols);
 
     let mut tokens_declaration = proc_macro2::TokenStream::new();
-    if let Err(e) = symbols.to_tokens(Phase::StructDeclaration, abi.as_str(), &mut tokens_declaration) {
+    if let Err(e) = symbols.to_tokens(
+        Phase::StructDeclaration,
+        abi.as_str(),
+        &mut tokens_declaration,
+    ) {
         return e.into();
     }
 
     let mut tokens_definition = proc_macro2::TokenStream::new();
-    if let Err(e) = symbols.to_tokens(Phase::StructDefinition, abi.as_str(), &mut tokens_definition) {
+    if let Err(e) = symbols.to_tokens(
+        Phase::StructDefinition,
+        abi.as_str(),
+        &mut tokens_definition,
+    ) {
         return e.into();
     }
 
     let mut tokens_func_definitions = proc_macro2::TokenStream::new();
-    if let Err(e) = symbols.to_tokens(Phase::FunctionDefinition { _const: _const.clone() }, abi.as_str(), &mut tokens_func_definitions) {
+    if let Err(e) = symbols.to_tokens(
+        Phase::FunctionDefinition {
+            _const: _const.clone(),
+        },
+        abi.as_str(),
+        &mut tokens_func_definitions,
+    ) {
         return e.into();
     }
 
@@ -626,16 +684,15 @@ pub fn load(attrs: TokenStream, input: TokenStream) -> TokenStream {
         }
 
         #tokens_func_definitions
-    ).into()
+    )
+    .into()
 }
 
 #[derive(Debug, Clone)]
 enum Phase {
     StructDeclaration,
     StructDefinition,
-    FunctionDefinition {
-        _const: Ident,
-    },
+    FunctionDefinition { _const: Ident },
 }
 
 struct Symbol {
@@ -645,19 +702,28 @@ struct Symbol {
 }
 
 impl Symbol {
-    fn to_tokens(&self, phase: Phase, abi: &str, tokens: &mut proc_macro2::TokenStream) -> Result<(), TokenStream2> {
+    fn to_tokens(
+        &self,
+        phase: Phase,
+        abi: &str,
+        tokens: &mut proc_macro2::TokenStream,
+    ) -> Result<(), TokenStream2> {
         let ident = self.signature.ident.clone();
         let args_tokens = self.signature.inputs.iter().map(remove_mut);
         let return_tokens = self.signature.output.to_token_stream();
         let signature = self.signature.clone();
         let _const = Ident::new("_const", Span::call_site());
-        let err_message = LitStr::new(format!("Could not find symbol {}", self.symbol.value()).as_str(), Span::call_site());
+        let err_message = LitStr::new(
+            format!("Could not find symbol {}", self.symbol.value()).as_str(),
+            Span::call_site(),
+        );
 
         match phase {
             Phase::StructDeclaration => {
                 quote!(
                     #ident: extern #abi fn(#(#args_tokens),*) #return_tokens,
-                ).to_tokens(tokens);
+                )
+                .to_tokens(tokens);
             }
             Phase::StructDefinition => {
                 let symbol = self.symbol.clone();
@@ -678,14 +744,16 @@ impl Symbol {
                         }
                     }
                     if !pushed {
-                        return Err(syn::Error::new(signature.span(), "Invalid argument").to_compile_error());
+                        return Err(syn::Error::new(signature.span(), "Invalid argument")
+                            .to_compile_error());
                     }
                 }
                 quote!(
                     #visibility unsafe fn #ident(#(#args_tokens),*) #return_tokens {
                         (#_const.#ident)(#(#args_names),*)
                     }
-                ).to_tokens(tokens);
+                )
+                .to_tokens(tokens);
             }
         }
 
@@ -696,7 +764,12 @@ impl Symbol {
 struct Symbols(Ident, Vec<Symbol>);
 
 impl Symbols {
-    fn to_tokens(&self, phase: Phase, abi: &str, tokens: &mut proc_macro2::TokenStream) -> Result<(), TokenStream2> {
+    fn to_tokens(
+        &self,
+        phase: Phase,
+        abi: &str,
+        tokens: &mut proc_macro2::TokenStream,
+    ) -> Result<(), TokenStream2> {
         let ident = self.0.clone();
 
         let mut stream = TokenStream2::new();
@@ -710,14 +783,16 @@ impl Symbols {
                     struct #ident {
                         #stream
                     }
-                ).to_tokens(tokens);
+                )
+                .to_tokens(tokens);
             }
             Phase::StructDefinition => {
                 quote!(
                     #ident {
                         #stream
                     }
-                ).to_tokens(tokens);
+                )
+                .to_tokens(tokens);
             }
             Phase::FunctionDefinition { _const } => {
                 tokens.extend(stream);
