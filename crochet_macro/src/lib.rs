@@ -389,31 +389,31 @@ pub fn hook(attrs: TokenStream, input: TokenStream) -> TokenStream {
     }
 
     let open_library = match library {
-        StrOrSelf::SelfValue(_) => quote!(crochet::dlopen2::raw::Library::open_self()),
-        StrOrSelf::LitStr(lit) => quote!(crochet::dlopen2::raw::Library::open(#lit)),
+        StrOrSelf::SelfValue(_) => quote!(::crochet::dlopen2::raw::Library::open_self()),
+        StrOrSelf::LitStr(lit) => quote!(::crochet::dlopen2::raw::Library::open(#lit)),
     };
 
     let offset = attrs.offset;
     quote!(
-        crochet::lazy_static::lazy_static! {
-            static ref #_const: crochet::detour::RawDetour = unsafe {
+        static #_const: ::std::sync::LazyLock<::crochet::detour::RawDetour> = ::std::sync::LazyLock::new(|| {
+            unsafe {
                 let symbol = #open_library
                     .expect("Could not open library")
                     .symbol::<*const ()>(#symbol)
                     .expect("Could not find symbol in library")
                     .wrapping_byte_offset(#offset);
 
-                crochet::detour::RawDetour::new(symbol, #ident as *const ()).expect("Could not load detour")
-            };
-        }
+                ::crochet::detour::RawDetour::new(symbol, #ident as *const ()).expect("Could not load detour")
+            }
+        });
 
         #mod_fn
 
-        pub fn #hook_enable() -> crochet::detour::Result<()> {
+        pub fn #hook_enable() -> ::crochet::detour::Result<()> {
             unsafe { #_const.enable() }
         }
 
-        pub fn #hook_disable() -> crochet::detour::Result<()> {
+        pub fn #hook_disable() -> ::crochet::detour::Result<()> {
             unsafe { #_const.disable() }
         }
 
@@ -674,14 +674,14 @@ pub fn load(attrs: TokenStream, input: TokenStream) -> TokenStream {
         #[allow(non_camel_case_types)]
         #tokens_declaration
 
-        crochet::lazy_static::lazy_static! {
-            static ref #_const: #_type = unsafe {
-                let library = crochet::dlopen2::raw::Library::open(#library)
+        static #_const: ::std::sync::LazyLock<#_type> = ::std::sync::LazyLock::new(|| {
+            unsafe {
+                let library = ::crochet::dlopen2::raw::Library::open(#library)
                     .expect("Could not open library");
 
                 #tokens_definition
-            };
-        }
+            }
+        });
 
         #tokens_func_definitions
     )

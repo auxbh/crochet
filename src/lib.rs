@@ -51,4 +51,3 @@
 pub use crochet_macro::*;
 pub use detour;
 pub use dlopen2;
-pub use lazy_static;

@@ -13,5 +13,5 @@ proc-macro = true
 syn = { version = "1", features = ["full"] }
 quote = "1"
 proc-macro2 = "1"
-convert_case = "0.6"
-dlopen2 = "0.6"
+convert_case = "0.9"
+dlopen2 = "0.8"
